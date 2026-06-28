@@ -1,0 +1,45 @@
+{
+  "id": "pytorch-sm121-cu130-aarch64-cp312",
+  "python_tag": "cp312",
+  "platform_tag": "linux_aarch64",
+  "cuda_variant": "cu130",
+  "min_sm": 121,
+  "packages": [
+    {
+      "name": "triton",
+      "specifier": "triton==3.4.0",
+      "filename": "triton-3.4.0-cp312-cp312-linux_aarch64.whl"
+    },
+    {
+      "name": "torch",
+      "specifier": "torch==2.11.0",
+      "filename": "torch-2.11.0-cp312-cp312-linux_aarch64.whl"
+    },
+    {
+      "name": "torchaudio",
+      "specifier": "torchaudio==2.11.0",
+      "filename": "torchaudio-2.11.0-cp312-cp312-linux_aarch64.whl"
+    },
+    {
+      "name": "torchvision",
+      "specifier": "torchvision==0.26.0",
+      "filename": "torchvision-0.26.0-cp312-cp312-linux_aarch64.whl"
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "numpy",
+      "specifier": "==1.26.4"
+    },
+    {
+      "name": "pillow",
+      "specifier": "==12.2.0"
+    }
+  ],
+  "hashes": {
+    "triton-3.4.0-cp312-cp312-linux_aarch64.whl": "sha256:<replace-me>",
+    "torch-2.11.0-cp312-cp312-linux_aarch64.whl": "sha256:<replace-me>",
+    "torchaudio-2.11.0-cp312-cp312-linux_aarch64.whl": "sha256:<replace-me>",
+    "torchvision-0.26.0-cp312-cp312-linux_aarch64.whl": "sha256:<replace-me>"
+  }
+}

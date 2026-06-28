@@ -1,0 +1,11 @@
+venv/
+.modly/
+__pycache__/
+*.pyc
+models/
+*.log
+*.tmp
+*.wav
+*.tar.gz
+wheelhouse/
+dependencies/

@@ -1,0 +1,17 @@
+MOSS-SoundEffect Modly Extension
+
+This repository contains a Modly extension wrapper/integration for MOSS-SoundEffect v2.0.
+
+Upstream model and runtime attribution:
+
+- Model weights: OpenMOSS-Team/MOSS-SoundEffect-v2.0
+  https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0
+
+- Runtime/source project: OpenMOSS/MOSS-TTS, moss_soundeffect_v2
+  https://github.com/OpenMOSS/MOSS-TTS/tree/main/moss_soundeffect_v2
+
+MOSS-SoundEffect v2.0 and its upstream runtime/model assets are maintained by OpenMOSS/OpenMOSS-Team and are not authored by this extension repository.
+
+This extension repository only provides the Modly process-extension packaging, setup/runtime integration, host compatibility matrix, and workflow artifact handling.
+
+Please review the upstream MOSS-SoundEffect license/model card before redistributing model weights or using generated outputs commercially.

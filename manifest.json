@@ -1,0 +1,234 @@
+{
+  "id": "moss-soundeffect-v2-process-extension",
+  "name": "MOSS-SoundEffect v2",
+  "type": "process",
+  "entry": "moss_soundeffect_process.py",
+  "version": "0.1.0",
+  "author": "DrHepa",
+  "source": "https://github.com/OpenMOSS/MOSS-TTS/tree/main/moss_soundeffect_v2",
+  "description": "Modly process extension for MOSS-SoundEffect v2 text-to-audio generation. Returns a workspace WAV artifact via result.filePath.",
+  "metadata": {
+    "resolution": "implemented",
+    "implementation_profile": "process-extension-with-custom-python-setup",
+    "setup_contract": "python-root-setup-py-json-observable",
+    "support_state": "matrix-host-lane-fail-fast",
+    "surface_owner": "electron-install-and-live-process; extension-owned-runtime-and-model-assets",
+    "headless_eligible": false,
+    "linux_arm64_risk": "local-wheelhouse-required-for-sm121-plus",
+    "linux_arm64_local_wheelhouse_lane": "dependencies/wheelhouse/pytorch-sm121-cu130-aarch64-cp312",
+    "source_builds": "manual-only-outside-setup",
+    "upstream_repo": "OpenMOSS/MOSS-TTS",
+    "hf_repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+    "weight_owner_id": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+    "download_check": "model_index.json",
+    "logical_model_root": "models/moss-soundeffect-v2-process-extension/generate-soundeffect",
+    "required_python": ">=3.12",
+    "sample_rate": 48000,
+    "max_inference_seconds": 30,
+    "output_contract": "done.result.filePath -> workspace relative .wav audio artifact; done.result.text -> JSON metadata fallback",
+    "model_asset_owner": "extension-setup",
+    "model_download_ui_supported": false
+  },
+  "asset_requirements": {
+    "strategy": "sentinel-files",
+    "required": [
+      "models/moss-soundeffect-v2-process-extension/generate-soundeffect/model_index.json",
+      "models/moss-soundeffect-v2-process-extension/generate-soundeffect/transformer/diffusion_pytorch_model.safetensors",
+      "models/moss-soundeffect-v2-process-extension/generate-soundeffect/vae/vae_128d_48k.pth",
+      "models/moss-soundeffect-v2-process-extension/generate-soundeffect/scheduler/scheduler_config.json",
+      "models/moss-soundeffect-v2-process-extension/generate-soundeffect/tokenizer/tokenizer.json",
+      "models/moss-soundeffect-v2-process-extension/generate-soundeffect/text_encoder/model.safetensors.index.json"
+    ],
+    "model_assets": [
+      {
+        "id": "model-index",
+        "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+        "path": "models/moss-soundeffect-v2-process-extension/generate-soundeffect/model_index.json"
+      },
+      {
+        "id": "transformer-weights",
+        "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+        "path": "models/moss-soundeffect-v2-process-extension/generate-soundeffect/transformer/diffusion_pytorch_model.safetensors"
+      },
+      {
+        "id": "vae-weights",
+        "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+        "path": "models/moss-soundeffect-v2-process-extension/generate-soundeffect/vae/vae_128d_48k.pth"
+      },
+      {
+        "id": "scheduler-config",
+        "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+        "path": "models/moss-soundeffect-v2-process-extension/generate-soundeffect/scheduler/scheduler_config.json"
+      },
+      {
+        "id": "tokenizer-json",
+        "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+        "path": "models/moss-soundeffect-v2-process-extension/generate-soundeffect/tokenizer/tokenizer.json"
+      },
+      {
+        "id": "text-encoder-index",
+        "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+        "path": "models/moss-soundeffect-v2-process-extension/generate-soundeffect/text_encoder/model.safetensors.index.json"
+      }
+    ]
+  },
+  "assets": {
+    "extension_root": "extensions/moss-soundeffect-v2-process-extension",
+    "model_roots": [
+      "models/moss-soundeffect-v2-process-extension/generate-soundeffect"
+    ]
+  },
+  "entrypoints": {
+    "setup": "setup.py",
+    "process": "moss_soundeffect_process.py"
+  },
+  "setup": {
+    "entrypoint": "setup.py",
+    "venv_dir": "venv",
+    "default_downloads": true,
+    "default_installs": true,
+    "source_ref": "main",
+    "model_root": "models/moss-soundeffect-v2-process-extension/generate-soundeffect",
+    "readiness_sentinel": ".modly/setup-ready.json",
+    "model_asset_policy": "setup.py downloads Hugging Face weights explicitly because process-extension weights are not downloaded by Modly's model UI"
+  },
+  "process": {
+    "entrypoint": "moss_soundeffect_process.py",
+    "runtime": "python",
+    "protocol": "jsonl-stdin-single-request",
+    "workspace_output_dir": "Workflows/MOSS-SoundEffect"
+  },
+  "platforms": [
+    {
+      "id": "linux-x64-nvidia-cuda",
+      "status": "experimental",
+      "notes": "Host-aware setup selects a validated CUDA lane per GPU class; SM12.1+ hosts require an explicit validated lane and cannot use the legacy cu128 lane."
+    },
+    {
+      "id": "linux-arm64-nvidia-cuda",
+      "status": "experimental",
+      "notes": "AArch64 SM12.1+ hosts use the local cu130 wheelhouse when present at dependencies/wheelhouse/pytorch-sm121-cu130-aarch64-cp312/WHEELHOUSE.json. Source builds stay manual and outside setup.py."
+    },
+    {
+      "id": "windows-x64",
+      "status": "experimental",
+      "notes": "Only modeled as experimental for NVIDIA SM12.1+ on cu130. Other Windows lanes fail fast as unsupported."
+    },
+    {
+      "id": "macos-arm64",
+      "status": "blocked",
+      "notes": "MPS and CPU fallback are intentionally blocked. Setup fails fast instead of pretending MOSS inference is supported there."
+    }
+  ],
+  "nodes": [
+    {
+      "id": "generate-soundeffect",
+      "name": "MOSS-SoundEffect v2",
+      "type": "process",
+      "input": "text",
+      "output": "audio",
+      "description": "Generates a 48 kHz WAV sound effect from an English or Chinese prompt. Requires Modly audio ArtifactKind support; setup.py provisions model assets and result.filePath points to the WAV artifact.",
+      "params_schema": [
+        {
+          "id": "prompt",
+          "label": "Prompt",
+          "type": "text",
+          "default": "The crisp, rhythmic click-clack of fast typing on a mechanical keyboard.",
+          "tooltip": "Prompt in English or Chinese. If omitted, runtime will read the upstream text input."
+        },
+        {
+          "id": "seconds",
+          "label": "Seconds",
+          "type": "int",
+          "default": 10,
+          "min": 1,
+          "max": 30,
+          "tooltip": "Requested output duration in seconds. Upstream max is 30."
+        },
+        {
+          "id": "num_inference_steps",
+          "label": "Inference Steps",
+          "type": "int",
+          "default": 100,
+          "min": 1,
+          "max": 300,
+          "tooltip": "Diffusion solver steps. Higher is slower."
+        },
+        {
+          "id": "cfg_scale",
+          "label": "CFG Scale",
+          "type": "float",
+          "default": 4.0,
+          "min": 0.1,
+          "max": 20.0,
+          "step": 0.1,
+          "tooltip": "Classifier-free guidance scale."
+        },
+        {
+          "id": "sigma_shift",
+          "label": "Sigma Shift",
+          "type": "float",
+          "default": 5.0,
+          "min": 0.1,
+          "max": 20.0,
+          "step": 0.1,
+          "tooltip": "Flow-match scheduler shift override."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 0,
+          "min": -1,
+          "max": 2147483647,
+          "tooltip": "Use -1 for a random seed."
+        },
+        {
+          "id": "torch_dtype",
+          "label": "Torch DType",
+          "type": "select",
+          "default": "bfloat16",
+          "options": [
+            {
+              "value": "bfloat16",
+              "label": "bfloat16"
+            },
+            {
+              "value": "float16",
+              "label": "float16"
+            },
+            {
+              "value": "float32",
+              "label": "float32"
+            }
+          ],
+          "tooltip": "Upstream examples prefer bfloat16 on CUDA."
+        },
+        {
+          "id": "disable_compile",
+          "label": "Disable Torch Compile",
+          "type": "select",
+          "default": "true",
+          "options": [
+            {
+              "value": "false",
+              "label": "No"
+            },
+            {
+              "value": "true",
+              "label": "Yes"
+            }
+          ],
+          "tooltip": "If Yes, runtime disables TorchDynamo/TorchInductor before imports. Default remains Yes as a conservative escape hatch, but setup must still select a compatible CUDA lane for the host GPU class."
+        },
+        {
+          "id": "output_name",
+          "label": "Output Name",
+          "type": "text",
+          "default": "",
+          "tooltip": "Optional filename stem. Runtime will sanitize it and force a .wav suffix."
+        }
+      ]
+    }
+  ]
+}
