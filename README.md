@@ -67,9 +67,26 @@ For Linux `aarch64` + `cp312` + `SM 12.1+`, the preferred path is a local wheelh
 - install the upstream Python runtime package from public GitHub
 - run `pip check`
 - run a post-install probe for `torch`, `torch.version.cuda`, CUDA availability, device capability, torch arch coverage, and `MossSoundEffectPipeline`
-- download the Hugging Face model snapshot into the extension-owned logical model directory by default
+- reuse a previously ready runtime when `.modly/setup-ready.json` still matches the current setup schema, selected lane, and runtime requirements hash
+- download the Hugging Face model snapshot into the extension-owned logical model directory only when required sentinels are missing, unless forced explicitly
 - validate required model sentinels after download
 - write `.modly/setup-ready.json`
+
+## Incremental setup behavior
+
+Setup now records `setup_schema_version`, `runtime_requirements_hash`, and `model_assets_signature` in `.modly/setup-ready.json`.
+
+- If the previous sentinel status is `ready` or `runtime_ready_model_missing`, the selected lane is unchanged, the runtime hash still matches, and the extension `venv` still exists, setup skips torch/runtime reinstalls and runs the post-install probe against the existing environment.
+- If the probe fails after a skipped install, setup falls back to the normal repair path and reinstalls the runtime for the resolved lane.
+- If required model sentinels already exist at the logical model root, setup skips `snapshot_download` and emits a `model-assets-skipped` status event.
+- If the previous sentinel status is `error`, or if the schema/hash/lane changed, setup does not trust the old state and reinstalls as needed.
+
+Force flags:
+
+- `force_reinstall=true`: ignore reusable runtime state and reinstall dependencies for the resolved lane
+- `force_model_download=true`: force a model snapshot refresh even when sentinels already exist
+- `skip_model_download=true` or `download_model_assets=false`: keep runtime setup but do not download missing model assets
+- `skip_probe=true`: skip the post-install health probe when explicitly needed
 
 ## Model asset provisioning
 

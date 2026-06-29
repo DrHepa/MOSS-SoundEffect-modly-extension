@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ from .common import (
     EXTENSION_ID,
     HF_REPO,
     MODEL_OWNER_REL,
+    REQUIRED_SENTINELS,
     UPSTREAM_GIT,
     emit_json,
     extension_root,
@@ -43,6 +45,9 @@ PINNED_PACKAGES = [
     "huggingface_hub>=0.30.0",
 ]
 
+SETUP_SCHEMA_VERSION = 2
+SETUP_BEHAVIOR_VERSION = 1
+
 
 def _read_wheelhouse_manifest(manifest_path: Path) -> dict[str, Any]:
     try:
@@ -54,6 +59,105 @@ def _read_wheelhouse_manifest(manifest_path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"Wheelhouse manifest must be a JSON object: {manifest_path}")
     return payload
+
+
+def _hash_payload(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _runtime_requirements_hash(lane: dict[str, Any]) -> str:
+    payload = {
+        "schema_version": SETUP_SCHEMA_VERSION,
+        "behavior_version": SETUP_BEHAVIOR_VERSION,
+        "lane_id": str(lane.get("id") or ""),
+        "install_source": str(lane.get("install_source") or ""),
+        "torch_index_url": str(lane.get("torch_index_url") or ""),
+        "torch_packages": [str(item) for item in lane.get("torch_packages") or []],
+        "required_wheels": [str(item) for item in lane.get("required_wheels") or []],
+        "cuda_variant": str(lane.get("cuda_variant") or ""),
+        "pinned_packages": list(PINNED_PACKAGES),
+        "upstream_git": UPSTREAM_GIT,
+    }
+    return _hash_payload(payload)
+
+
+def _model_assets_signature() -> str:
+    payload = {
+        "schema_version": SETUP_SCHEMA_VERSION,
+        "hf_repo": HF_REPO,
+        "required_sentinels": [str(path) for path in REQUIRED_SENTINELS],
+    }
+    return _hash_payload(payload)
+
+
+def _read_previous_sentinel(ext_dir: Path) -> dict[str, Any] | None:
+    sentinel_path = ext_dir / ".modly/setup-ready.json"
+    if not sentinel_path.is_file():
+        return None
+    try:
+        payload = json.loads(sentinel_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _runtime_reuse_decision(
+    previous: dict[str, Any] | None,
+    lane: dict[str, Any],
+    runtime_requirements_hash: str,
+    venv_python: Path,
+    *,
+    force_reinstall: bool,
+) -> dict[str, Any]:
+    decision = {
+        "skip_runtime_install": False,
+        "reason": "no_previous_ready_sentinel",
+        "previous_status": None,
+    }
+    if force_reinstall:
+        decision["reason"] = "force_reinstall"
+        return decision
+    if previous is None:
+        return decision
+
+    previous_status = str(previous.get("status") or "")
+    decision["previous_status"] = previous_status
+    if previous_status not in {"ready", "runtime_ready_model_missing"}:
+        decision["reason"] = f"previous_status_{previous_status or 'unknown'}"
+        return decision
+
+    try:
+        previous_schema_version = int(previous.get("setup_schema_version") or 0)
+    except (TypeError, ValueError):
+        previous_schema_version = 0
+    previous_lane = previous.get("lane") if isinstance(previous.get("lane"), dict) else {}
+    if str(previous_lane.get("id") or "") != str(lane.get("id") or ""):
+        decision["reason"] = "lane_changed"
+        return decision
+    if not venv_python.exists():
+        decision["reason"] = "venv_python_missing"
+        return decision
+
+    # Migration path for sentinels written before setup hashes existed. Reuse
+    # only when the previous state was runnable, the selected lane still matches,
+    # and the venv python exists. The post-install probe still runs immediately;
+    # if that probe fails, setup falls back to a normal reinstall/repair.
+    if previous_schema_version == 0 and not previous.get("runtime_requirements_hash"):
+        decision["skip_runtime_install"] = True
+        decision["reason"] = "reused_legacy_ready_runtime_probe_required"
+        return decision
+
+    if previous_schema_version != SETUP_SCHEMA_VERSION:
+        decision["reason"] = "schema_version_changed"
+        return decision
+    if str(previous.get("runtime_requirements_hash") or "") != runtime_requirements_hash:
+        decision["reason"] = "runtime_requirements_hash_changed"
+        return decision
+
+    decision["skip_runtime_install"] = True
+    decision["reason"] = "reused_ready_runtime"
+    return decision
 
 
 def _verify_wheelhouse(lane: dict[str, Any], host: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +296,37 @@ def _run_pip_check(venv_python: Path, env: dict[str, str] | None = None) -> dict
     }
 
 
+def _install_runtime(
+    venv_python: Path,
+    lane: dict[str, Any],
+    host: dict[str, Any],
+    env: dict[str, str],
+) -> dict[str, Any] | None:
+    wheelhouse_info: dict[str, Any] | None = None
+    _run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools<82", "wheel"], "bootstrap-pip", env=env)
+    if lane.get("install_torch"):
+        if lane.get("install_source") == "wheelhouse":
+            wheelhouse_info = _verify_wheelhouse(lane, host)
+            emit_json(
+                {
+                    "status": "log",
+                    "step": "verify-wheelhouse",
+                    "wheelhouse_dir": wheelhouse_info["wheelhouse_dir"],
+                    "wheelhouse_manifest": wheelhouse_info["wheelhouse_manifest"],
+                    "required_wheels": lane.get("required_wheels") or [],
+                }
+            )
+        torch_cmd = _build_torch_install_cmd(venv_python, lane, wheelhouse_info)
+        _run(torch_cmd, f"install-torch-{lane.get('cuda_variant') or 'default'}", env=env)
+    _run([str(venv_python), "-m", "pip", "install", *PINNED_PACKAGES], "install-runtime-dependencies", env=env)
+    _run(
+        [str(venv_python), "-m", "pip", "install", "--ignore-requires-python", "--no-deps", f"git+{UPSTREAM_GIT}"],
+        "install-upstream-runtime",
+        env=env,
+    )
+    return wheelhouse_info
+
+
 def _safe_relative_dir(value: str) -> Path:
     candidate = Path(value)
     if candidate.is_absolute() or ".." in candidate.parts:
@@ -317,15 +452,28 @@ def _post_install_probe(venv_python: Path, lane: dict[str, Any], host: dict[str,
     return payload
 
 
+def _wheelhouse_payload(lane: dict[str, Any], wheelhouse_info: dict[str, Any] | None, previous: dict[str, Any] | None) -> dict[str, Any]:
+    previous_wheelhouse = previous.get("wheelhouse") if isinstance(previous, dict) and isinstance(previous.get("wheelhouse"), dict) else {}
+    return {
+        "install_source": lane.get("install_source"),
+        "wheelhouse_dir": wheelhouse_info.get("wheelhouse_dir") if wheelhouse_info else previous_wheelhouse.get("wheelhouse_dir", lane.get("wheelhouse_dir")),
+        "wheelhouse_manifest": wheelhouse_info.get("wheelhouse_manifest") if wheelhouse_info else previous_wheelhouse.get("wheelhouse_manifest", lane.get("wheelhouse_manifest")),
+        "manifest": wheelhouse_info.get("manifest") if wheelhouse_info else previous_wheelhouse.get("manifest"),
+    }
+
+
 def main() -> int:
     context = _load_context()
     ext_dir = Path(context.get("ext_dir") or extension_root())
     python_exe = str(context.get("python_exe") or sys.executable)
     venv_rel = _safe_relative_dir(str(context.get("venv_dir") or "venv"))
     venv_dir = ext_dir / venv_rel
-    download_model_assets = _bool_from_context(context.get("download_model_assets"), True) and not _bool_from_context(
-        context.get("skip_model_download"),
-        False,
+    force_reinstall = _bool_from_context(context.get("force_reinstall"), False)
+    force_model_download = _bool_from_context(context.get("force_model_download"), False)
+    skip_probe = _bool_from_context(context.get("skip_probe"), False)
+    download_model_assets = force_model_download or (
+        _bool_from_context(context.get("download_model_assets"), True)
+        and not _bool_from_context(context.get("skip_model_download"), False)
     )
     pip_env = os.environ.copy()
     pip_env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
@@ -333,11 +481,25 @@ def main() -> int:
     host: dict[str, Any] | None = None
     lane: dict[str, Any] | None = None
     wheelhouse_info: dict[str, Any] | None = None
+    pip_check_result: dict[str, Any] | None = None
+    post_install_probe: dict[str, Any] | None = None
+    runtime_requirements_hash = ""
+    model_assets_signature = _model_assets_signature()
+    previous_sentinel = _read_previous_sentinel(ext_dir)
+    install_plan: dict[str, Any] = {
+        "force_reinstall": force_reinstall,
+        "force_model_download": force_model_download,
+        "skip_probe": skip_probe,
+    }
+    skipped_steps: list[str] = []
+    runtime_install_skipped = False
+    downloads_started = False
 
     try:
         compatibility = resolve_host_compat({**context, "python_exe": python_exe, "ext_dir": str(ext_dir)})
         host = compatibility["host"]
         lane = compatibility["lane"]
+        runtime_requirements_hash = _runtime_requirements_hash(lane)
 
         emit_json(
             {
@@ -351,6 +513,9 @@ def main() -> int:
                 "installs_started": False,
                 "host": host,
                 "lane": lane,
+                "setup_schema_version": SETUP_SCHEMA_VERSION,
+                "runtime_requirements_hash": runtime_requirements_hash,
+                "model_assets_signature": model_assets_signature,
             }
         )
 
@@ -377,29 +542,62 @@ def main() -> int:
         if not venv_python.exists():
             raise RuntimeError(f"Virtual environment python not found at {venv_python}")
 
-        _run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools<82", "wheel"], "bootstrap-pip", env=pip_env)
-        if lane.get("install_torch"):
-            if lane.get("install_source") == "wheelhouse":
-                wheelhouse_info = _verify_wheelhouse(lane, host)
-                emit_json(
-                    {
-                        "status": "log",
-                        "step": "verify-wheelhouse",
-                        "wheelhouse_dir": wheelhouse_info["wheelhouse_dir"],
-                        "wheelhouse_manifest": wheelhouse_info["wheelhouse_manifest"],
-                        "required_wheels": lane.get("required_wheels") or [],
-                    }
-                )
-            torch_cmd = _build_torch_install_cmd(venv_python, lane, wheelhouse_info)
-            _run(torch_cmd, f"install-torch-{lane.get('cuda_variant') or 'default'}", env=pip_env)
-        _run([str(venv_python), "-m", "pip", "install", *PINNED_PACKAGES], "install-runtime-dependencies", env=pip_env)
-        _run(
-            [str(venv_python), "-m", "pip", "install", "--ignore-requires-python", "--no-deps", f"git+{UPSTREAM_GIT}"],
-            "install-upstream-runtime",
-            env=pip_env,
+        runtime_reuse = _runtime_reuse_decision(
+            previous_sentinel,
+            lane,
+            runtime_requirements_hash,
+            venv_python,
+            force_reinstall=force_reinstall,
         )
+        runtime_install_skipped = bool(runtime_reuse["skip_runtime_install"])
+        install_plan.update(
+            {
+                "runtime_reuse": runtime_reuse,
+                "runtime_requirements_hash": runtime_requirements_hash,
+                "selected_lane": str(lane.get("id") or ""),
+            }
+        )
+
+        if runtime_install_skipped:
+            skipped_steps.extend(["bootstrap-pip", "install-torch", "install-runtime-dependencies", "install-upstream-runtime"])
+            emit_json(
+                {
+                    "status": "runtime-install-skipped",
+                    "reason": runtime_reuse["reason"],
+                    "previous_status": runtime_reuse["previous_status"],
+                    "venv_dir": str(venv_dir),
+                    "selected_lane": str(lane.get("id") or ""),
+                }
+            )
+        else:
+            wheelhouse_info = _install_runtime(venv_python, lane, host, pip_env)
+
         pip_check_result = _run_pip_check(venv_python, env=pip_env)
-        post_install_probe = _post_install_probe(venv_python, lane, host, pip_env)
+        if skip_probe:
+            skipped_steps.append("post-install-probe")
+            post_install_probe = {"ok": None, "skipped": True, "reason": "skip_probe"}
+            emit_json({"status": "probe-skipped", "step": "post-install-probe", "reason": "skip_probe"})
+        else:
+            try:
+                post_install_probe = _post_install_probe(venv_python, lane, host, pip_env)
+            except Exception:
+                if runtime_install_skipped:
+                    emit_json(
+                        {
+                            "status": "log",
+                            "step": "runtime-repair",
+                            "message": "Skipped runtime failed the health probe; reinstalling dependencies to repair the environment.",
+                            "selected_lane": str(lane.get("id") or ""),
+                        }
+                    )
+                    runtime_install_skipped = False
+                    skipped_steps = [step for step in skipped_steps if step not in {"bootstrap-pip", "install-torch", "install-runtime-dependencies", "install-upstream-runtime"}]
+                    wheelhouse_info = _install_runtime(venv_python, lane, host, pip_env)
+                    pip_check_result = _run_pip_check(venv_python, env=pip_env)
+                    post_install_probe = _post_install_probe(venv_python, lane, host, pip_env)
+                    install_plan["runtime_reuse"]["repaired_after_probe_failure"] = True
+                else:
+                    raise
 
         current_model_root = _resolve_model_root(ext_dir)
         legacy_root = legacy_model_root()
@@ -413,18 +611,35 @@ def main() -> int:
                     "model_root": str(current_model_root),
                 }
             )
-        downloads_started = False
-        if download_model_assets:
-            missing_before_download = validate_model_files(current_model_root)
+        missing_before_download = validate_model_files(current_model_root)
+        if force_model_download:
+            downloads_started = True
+            _download_model_assets(venv_python, current_model_root, pip_env)
+        elif not missing_before_download:
+            skipped_steps.append("download-model-assets")
+            emit_json(
+                {
+                    "status": "model-assets-skipped",
+                    "model_root": str(current_model_root),
+                    "sentinel_count": len(REQUIRED_SENTINELS),
+                    "reason": "required_sentinels_present",
+                }
+            )
+        elif download_model_assets:
             if missing_before_download:
                 downloads_started = True
                 _download_model_assets(venv_python, current_model_root, pip_env)
+        else:
+            skipped_steps.append("download-model-assets")
 
         missing = validate_model_files(current_model_root)
         if download_model_assets and missing:
             raise RuntimeError(f"Model asset download completed but required sentinels are still missing: {missing}")
         sentinel_payload = {
             "status": "ready" if not missing else "runtime_ready_model_missing",
+            "setup_schema_version": SETUP_SCHEMA_VERSION,
+            "runtime_requirements_hash": runtime_requirements_hash,
+            "model_assets_signature": model_assets_signature,
             "extension_id": EXTENSION_ID,
             "python_exe": str(venv_python),
             "venv_dir": str(venv_dir),
@@ -432,17 +647,16 @@ def main() -> int:
             "hf_repo": HF_REPO,
             "downloads_started": downloads_started,
             "download_model_assets": download_model_assets,
-            "installs_started": True,
+            "installs_started": not runtime_install_skipped,
+            "runtime_install_skipped": runtime_install_skipped,
             "host": host,
             "lane": lane,
+            "selected_lane": str(lane.get("id") or ""),
             "pip_check": pip_check_result,
             "post_install_probe": post_install_probe,
-            "wheelhouse": {
-                "install_source": lane.get("install_source"),
-                "wheelhouse_dir": wheelhouse_info.get("wheelhouse_dir") if wheelhouse_info else lane.get("wheelhouse_dir"),
-                "wheelhouse_manifest": wheelhouse_info.get("wheelhouse_manifest") if wheelhouse_info else lane.get("wheelhouse_manifest"),
-                "manifest": wheelhouse_info.get("manifest") if wheelhouse_info else None,
-            },
+            "wheelhouse": _wheelhouse_payload(lane, wheelhouse_info, previous_sentinel),
+            "install_plan": install_plan,
+            "skipped_steps": skipped_steps,
             "missing_model_files": missing,
             "setup_contract": "python-root-setup-py-json-observable",
             "next_steps": [
@@ -459,10 +673,15 @@ def main() -> int:
             "code": "setup_command_failed",
             "message": f"Setup command failed during step '{exc.cmd}'.",
             "details": {"returncode": exc.returncode, "command": exc.cmd},
+            "setup_schema_version": SETUP_SCHEMA_VERSION,
+            "runtime_requirements_hash": runtime_requirements_hash,
+            "model_assets_signature": model_assets_signature,
             "host": host,
             "lane": lane,
             "downloads_started": False,
-            "installs_started": True,
+            "installs_started": not runtime_install_skipped,
+            "install_plan": install_plan,
+            "skipped_steps": skipped_steps,
             "next_steps": [
                 "Inspect Electron setup logs for the failed pip command.",
                 "Verify Python 3.12 and NVIDIA CUDA compatibility before retrying.",
@@ -476,10 +695,15 @@ def main() -> int:
             "status": "error",
             "code": "setup_failed",
             "message": str(exc),
+            "setup_schema_version": SETUP_SCHEMA_VERSION,
+            "runtime_requirements_hash": runtime_requirements_hash,
+            "model_assets_signature": model_assets_signature,
             "host": host,
             "lane": lane,
             "downloads_started": False,
-            "installs_started": False,
+            "installs_started": not runtime_install_skipped,
+            "install_plan": install_plan,
+            "skipped_steps": skipped_steps,
             "next_steps": [
                 "Verify the injected python_exe is Python 3.12+.",
                 "Retry setup inside Modly on a host matrix that resolves to a supported or explicitly accepted experimental CUDA lane.",
